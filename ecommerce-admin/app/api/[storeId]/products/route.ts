@@ -120,9 +120,9 @@ export async function GET(
             },
             include: {
                 images: true,
-                Category: true,
-                Color: true,
-                Size: true
+                category: true,
+                color: true,
+                size: true
             }, 
             orderBy: {
                 createdAt: 'desc'

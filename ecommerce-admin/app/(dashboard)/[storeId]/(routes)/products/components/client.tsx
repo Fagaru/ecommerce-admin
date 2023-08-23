@@ -15,7 +15,7 @@ interface ProductClientProps {
     data: ProductColumn[]
 }
 
-export const ProductClient: React.FC<ProductClientProps> = ({
+export const ProductsClient: React.FC<ProductClientProps> = ({
     data
 }) => {
     const router = useRouter();

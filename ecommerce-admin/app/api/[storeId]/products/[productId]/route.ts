@@ -16,9 +16,9 @@ export async function GET (
             },
             include: {
                images: true,
-               Category: true, 
-               Size: true,
-               Color: true
+               category: true, 
+               size: true,
+               color: true
             }
         });
         
