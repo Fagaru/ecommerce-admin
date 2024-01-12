@@ -1,0 +1,137 @@
+stages:
+    - build
+    - package
+    - test
+    - deploy to dev
+    - deploy to recette
+    - deploy to production
+
+
+variables:
+  APP_VERSION: $CI_PIPELINE_IID
+
+
+build app:
+    image: node:18
+    stage: build
+    script:
+       - npm install
+       - npx prisma generate
+       - npm run lint 
+       #- yarn test 
+       - npm run build
+      # - yarn start
+       - echo $APP_VERSION > .next/version.html
+       
+    artifacts:
+      paths:
+        - .next/
+        - node_modules/
+      
+    cache:
+      key: ${CI_COMMIT_REF_SLUG}-20231107
+      paths:
+        - node_modules/
+
+build docker image:
+    stage: package 
+    image: docker:latest
+    services:
+        - docker:dind 
+    script: 
+        - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+        - docker build -t $CI_REGISTRY_IMAGE -t $CI_REGISTRY_IMAGE:$APP_VERSION . 
+        - docker image ls 
+        - docker push --all-tags $CI_REGISTRY_IMAGE
+
+test docker image:
+  stage: test
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+  script:
+    - docker pull $CI_REGISTRY_IMAGE:$APP_VERSION
+    - docker run -d -p 3000:3000 --name test_container $CI_REGISTRY_IMAGE:$APP_VERSION
+    - sleep 10  # Allow time for startup
+    - docker exec test_container curl http://localhost:3000  # Basic health check
+    - docker stop test_container
+    - docker rm test_container
+
+  
+
+
+.deploy:
+    image: 
+        name: amazon/aws-cli:2.13.18
+        entrypoint: [""]
+    script:
+        - aws --version
+        - yum install -y gettext 
+        - export DEPLOY_TOKEN=$(echo $PATOKEN |tr -d "\n" | base64)
+        - envsubst < templates/Dockerrun.aws.json > Dockerrun.aws.json
+        - envsubst < templates/auth.json > auth.json
+        - cat Dockerrun.aws.json
+        - cat auth.json
+        - aws s3 cp Dockerrun.aws.json s3://$AWS_S3_BUCKET/Dockerrun.aws.json
+        - aws s3 cp auth.json s3://$AWS_S3_BUCKET/auth.json
+      # - aws elasticbeanstalk create-application-version --application-name "$APP_NAME" 
+        - |
+          if aws elasticbeanstalk describe-application-versions --application-name "$APP_NAME" --version-labels "$APP_VERSION" | grep -q "$APP_VERSION"; then
+            echo "Application version $APP_VERSION already exists."
+          else
+              aws elasticbeanstalk create-application-version --application-name "$APP_NAME" --version-label $APP_VERSION --source-bundle S3Bucket=$AWS_S3_BUCKET,S3Key=Dockerrun.aws.json
+          fi
+        #--version-label $APP_VERSION --source-bundle S3Bucket=$AWS_S3_BUCKET,S3Key=Dockerrun.aws.json 
+        - aws elasticbeanstalk update-environment --application-name "$APP_NAME" --version-label $APP_VERSION --environment-name $APP_ENV_NAME
+        #- aws elasticbeanstalk wait environment-updated --application-name "$APP_NAME" --version-label $APP_VERSION --environment-name $APP_ENV_NAME 
+        - | 
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            status=$(aws elasticbeanstalk describe-environments --application-name "$APP_NAME" --environment-names "$APP_ENV_NAME" --query 'Environments[0].Status' --output text)
+            if [ "$status" == "Ready" ]; then
+              echo "Environment updated successfully."
+              break
+            fi
+            attempt=$((attempt+1))
+            echo "Waiting for environment to be updated (attempt: $attempt)..."
+            sleep 20
+          done
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Environment update failed: Max attempts exceeded."
+            exit 1
+          fi
+        #- curl $CI_ENVIRONMENT_URL/version.html | grep $APP_VERSION
+
+
+deploy to dev: 
+    stage: deploy to dev
+    environment: devv
+    variables:
+      APP_NAME: Pharma
+      APP_ENV_NAME: Pharma-env
+    extends: .deploy
+
+
+deploy to recette: 
+    stage: deploy to recette
+    when: manual
+    environment: recette
+    variables:
+      APP_NAME: Pharma
+      APP_ENV_NAME: Pharma-env-rec
+    extends: .deploy
+
+deploy to production: 
+    stage: deploy to production
+    when: manual
+    environment: production
+    variables:
+      APP_NAME: Pharma
+      APP_ENV_NAME: Pharma-env-prod
+    extends: .deploy
+    rules: 
+        - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
